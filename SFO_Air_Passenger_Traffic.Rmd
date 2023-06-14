@@ -1,0 +1,497 @@
+---
+title: "Time Series Forecasting for SFO Air Passengers"
+member: "Yan Naing Oo"
+date: "`r Sys.Date()`"
+output: officedown::rdocx_document
+always_allow_html: true
+---
+
+# Load Packages
+
+```{r}
+
+library(fpp3)
+library(tsibble)
+library(readr)
+library(tseries)
+library(plotly)
+library(knitr)
+library(officedown)
+```
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+	echo = FALSE,
+	# Table Caption
+	tab.cap.style = "Table Caption",
+	tab.cap.pre = "Table",
+	tab.cap.sep = ": ",
+	# Figure Captioning
+	fig.cap.style = "Image Caption",
+	fig.cap.sep = ": "
+	
+)
+```
+
+# Load data from SFO air passenger .csv file
+
+```{r}
+# load the sf air passengers data
+air_passenger_data <- read_csv("Air_Traffic_Passenger_Statistics.csv", show_col_types = FALSE) %>%
+  mutate(Year =  ymd(paste(substr(`Activity Period`, 1,4), substr(`Activity Period`, 5,6), "01", sep ="/"))) %>%
+
+  rename(
+    year = Year,
+    operating_airline = `Operating Airline`,
+    operating_airline_iata_code = `Operating Airline IATA Code`,
+    published_airline = `Published Airline`,
+    published_airline_iata_code = `Published Airline IATA Code`,
+    geo_summary = `GEO Summary`,
+    geo_region = `GEO Region`,
+    activity_type_code = `Activity Type Code`,
+    price_category_code = `Price Category Code`,
+    terminal = `Terminal`,
+    boarding_area = `Boarding Area`,
+    passenger_count =`Passenger Count`
+   
+  ) %>%
+  
+  select(-`Activity Period` )
+  glimpse(air_passenger_data)
+  
+ 
+```
+
+# Data Exploration
+
+#### Air Passengers Traffic at SFO
+
+```{r}
+
+sfo_passenger <- air_passenger_data %>%
+  group_by(year) %>%
+  summarize(total = sum(passenger_count))
+
+# Visualize the passenger count over time
+plot_ly(data = sfo_passenger,
+        x = ~ year,
+        y = ~ total/1e6,
+        type = "scatter",
+        mode = "lines") %>%
+  layout(title = "Monthly Air Traffic Passengers at SFO",
+         yaxis = list(title = "Passenger (in million)"),
+         xaxis = list(title = "Year"))
+
+
+```
+
+#### Air Passengers Traffic at SFO by Activity Type
+
+```{r}
+
+start <- as.Date("2010-01-01")   
+end <- as.Date("2022-12-31")
+
+
+sfo_passenger_by_activity <- air_passenger_data %>%
+  filter(year >= start & year <= end ) %>%
+  group_by(year, activity_type_code) %>%
+  summarize(total = sum(passenger_count), .groups = "drop")
+
+plot_ly(data = sfo_passenger_by_activity,
+        x = ~ year,
+        y = ~ total/1e6,
+        color = ~ activity_type_code,
+        type = "scatter",
+        mode = "lines") %>%
+  layout(title = "Air Passengers Traffic at SFO by Activity Type",
+         yaxis = list(title = "Passenger (in million)"),
+         xaxis = list(title = "Year"))
+
+
+```
+
+#### Air Passengers Traffic at SFO by Geography
+
+```{r}
+
+sfo_passenger_by_geo <- air_passenger_data %>%
+  filter(year >= start & year <= end ) %>%
+  group_by(year, geo_summary) %>%
+  summarize(total = sum(passenger_count), .groups = "drop")
+
+plot_ly(data = sfo_passenger_by_geo,
+        x = ~ year,
+        y = ~ total/1e6,
+        color = ~ geo_summary,
+        type = "scatter",
+        mode = "lines") %>%
+  layout(title = "Air Passengers Traffic at SFO by Geography",
+         yaxis = list(title = "Passenger (in million)"),
+         xaxis = list(title = "Year"))
+
+sfo_geosummary_pcs <- air_passenger_data %>%
+  filter(year >= start & year <= end ) %>%
+  group_by(geo_summary) %>%
+  summarise(total = sum(passenger_count), .groups = "drop") %>%
+  mutate(percent = paste0(round(total / sum(total) * 100, 1), "%"))
+
+
+```
+
+#### Geo Summary by Passengers
+
+```{r}
+
+ggplot(sfo_geosummary_pcs, aes(x = geo_summary, y = percent, fill = geo_summary)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = percent), vjust = -0.5) +
+  labs(x = "Geo Summary", y = "Percentage", title = "Geo Summary by Passengers") +
+  theme_minimal()
+
+
+
+```
+
+```{r}
+
+sfo_operating_airline_pcs <- air_passenger_data %>%
+  filter(year >= start & year <= end) %>%
+  group_by(operating_airline) %>%
+  summarise(total = sum(passenger_count/1e6), .groups = "drop") %>%
+  mutate(percent = paste0(round(total / sum(total) * 100, 1), "%")) %>%
+  arrange(desc(total)) %>%
+  top_n(10)
+
+```
+
+#### Top 10 Operating Airlines by Percentage
+
+```{r tab.cap="sfo_top_passenger table", tab.id="sfopassengertab", tab.cap.style="Table Caption"}
+
+head(sfo_operating_airline_pcs,10)
+
+
+```
+
+# Data Transformation
+
+#### Convert to tisbble format
+
+```{r}
+
+sfo_data <- air_passenger_data %>%
+  filter(year >= start & year <= end) %>%
+  group_by(year) %>%
+  summarise(total = sum(passenger_count/1e6)) 
+
+sfo <- ts(sfo_data$total, start = c(year(sfo_data$year[1]), month(sfo_data$year[1])), frequency = 12) 
+
+
+sfo_ts <- as_tsibble(sfo) %>%
+ # filter(year >= yearmonth("2000") & year <= yearmonth("2022")) %>%
+  rename(year = index, total = value) 
+
+
+```
+
+```{r tab.cap="sfo_passenger table", tab.id="sfotab", tab.cap.style="Table Caption"}
+
+head(sfo_ts)
+
+```
+
+#### Box-Cox transformation for `lambda`
+
+```{r}
+
+# box_cox transformation is stabilizing variance in the time series
+lambda <- sfo_ts %>%
+  features(total, features = guerrero) %>%
+  pull(lambda_guerrero)
+
+bc_lambda = lambda
+
+sfo_ts %>%
+  autoplot(box_cox(total, lambda)) +
+  labs(y = "",
+       title = latex2exp::TeX(paste0(
+         "Monthly SFO Air Passengers with $\\lambda$=",
+         round(lambda,2))))
+
+```
+
+Note: We tried implementing Box-Cox transformation, but it did not have much impact on the final results, hence while applying final model fitting we used non transformed data.
+
+#### Decomposition using STL
+
+```{r}
+
+stl_sfo_ts_dcmp <- sfo_ts %>%
+  model( STL(total ~ trend(window = 21) + season(window = 13),  robust = TRUE) ) %>%    # default - monthly trend(window=21) & seasonal(window=13) 
+  components()
+
+autoplot(stl_sfo_ts_dcmp) +
+  labs(title =
+    "Decomposition of SFO Air Passengers using STL")
+
+```
+
+#### KPSS test for differencing
+
+```{r}
+
+sfo_ts %>%
+features(total, unitroot_kpss)
+
+sfo_ts %>%
+features(total, unitroot_ndiffs)
+
+```
+
+p-value (0.02) is significant. Reject null hypothesis. It indicate that the series is not stationary. Therefore a number difference required to make a time series stationary.
+
+#### Dickey-Fuller test
+
+```{r}
+# Check stationarity  ?
+adf_test <- adf.test(sfo_ts$total, alternative = "stationary")
+
+head(adf_test$p.value)
+# p.value > 0.05 then the series is likely non-stationary
+
+```
+
+#### Split train and test set
+
+```{r}
+
+# create test set by 12 month
+test <- sfo_ts %>%
+  tail(12)
+  
+# create train set
+train <- sfo_ts %>% 
+  head(-12)
+
+
+```
+
+```{r}
+
+
+# check for train set
+min_train <- min(train$year)
+max_train <- max(train$year)
+
+print(paste("Train Min: ", min_train, " Train Max: ", max_train))
+
+```
+
+```{r}
+
+# check for test set
+min_test <- min(test$year)
+max_test <- max(test$year)
+
+print(paste("Test Min: ", min_test, " Test Max: ", max_test))
+
+```
+
+#### Examine ACF and PACF plots for the differenced
+
+```{r}
+
+train %>%
+  gg_tsdisplay(difference(total), plot_type='partial') +
+  labs(title="Non Seaonal differenced", y="")
+
+train |>
+  gg_tsdisplay(difference(total, 12),
+               plot_type='partial', lag=36) +
+  labs(title="Seasonally differenced", y="")
+
+#train %>%
+  #gg_tsdisplay(difference(total,12) %>% difference(), plot_type='partial', lag=36) +
+  #labs(title = "Double Seasonally differenced", y="")
+
+  
+```
+
+# Model Fitting
+
+#### Fit the models (ets, arima)
+
+```{r}
+
+sfo_fit <- train %>%
+  model(
+  
+     # Exponential smoothing model (ternd + seasonal) no need transformation
+    Ets_auto = ETS(total),   
+    Ets_ses = ETS(total ~ error("A") + trend("A") + season("N")), 
+    Ets_hw_mul = ETS(total ~ error("M") + trend("A") + season("M")),
+    Ets_damped_add = ETS(total  ~ error("A") + trend("Ad") + season("A")),
+    Ets_damped_mul = ETS(total ~ error("A") + trend("Ad") + season("M")),
+    
+    # Arima models
+    Arima_stepwise = ARIMA(total),
+    Arima_search = ARIMA(total, stepwise = FALSE),
+    Arima_311 = ARIMA(total ~ pdq(3,1,1)),
+    Arima_410 = ARIMA(total ~ pdq(4,1,0)),
+    Arima_012 = ARIMA(total ~ pdq(0,1,2)),
+    
+    Arima012011 = ARIMA(total ~ pdq(0,1,2) + PDQ(0,1,1)),
+    Arima210011 = ARIMA(total ~ pdq(2,1,0) + PDQ(0,1,1)),
+    Arima011011 = ARIMA(total ~ pdq(0,1,1) + PDQ(0,1,1)),
+    Arima212011 = ARIMA(total ~ pdq(2,1,2) + PDQ(0,1,1)),
+    Arima210111 = ARIMA(total ~ pdq(2,1,0) + PDQ(1,1,1))
+   
+   
+  )
+
+# forecast (36 months) 3 years in the future
+sfo_fc <- sfo_fit %>%
+  forecast(h = 36)
+
+
+sfo_fit %>% pivot_longer(everything(), names_to = "Model name",
+                     values_to = "Orders")
+
+```
+
+# Model Evaluation Metrics
+
+#### Accuracy measures of the forecast
+
+```{r}
+
+
+# calculate the accuracy measures on test set
+accuracy(sfo_fc, test) %>%
+#accuracy(sfo_fit) %>%
+  arrange(RMSE) %>%
+  select(.model, .type, RMSE, MAE, MAPE,)
+
+
+```
+
+-   RMSE (Root Mean Squared Error): measures the average difference between the forecasted and the actual values, taking into account the squared differences.
+
+-   The `lowest RMSE` indicates `better accuracy`.
+
+#### Summary report for fitted time series models
+
+```{r}
+
+selected_models <- sfo_fit %>%
+  select(Ets_ses, Ets_damped_mul, Arima012011, Arima011011, Arima210011)
+
+report(selected_models) %>% 
+  arrange(AICc) %>%
+  select(.model, AIC, AICc, BIC,)
+
+```
+
+-   AICc (Akaike Information Criterion corrected): a `lowest AICc` value indicates a `best-fitting model`.
+
+```{r}
+
+refit <- train %>%
+  model(
+    Arima011011 = ARIMA(total ~ pdq(0,1,1) + PDQ(0,1,1)),
+    Arima210011 = ARIMA(total ~ pdq(2,1,0) + PDQ(0,1,1)),
+    Arima012011 = ARIMA(total ~ pdq(0,1,2) + PDQ(0,1,1)),
+    Ets_damped_mul = ETS(total ~ error("A") + trend("Ad") + season("M")),
+    Ets_ses = ETS(total ~ error("A") + trend("A") + season("N"))
+    
+    
+  )
+
+refc <- refit %>% forecast(h = 36)
+
+train %>%
+  autoplot(total) +
+  geom_line(aes(y = .fitted, color = .model), data = fitted(refit)) +
+  labs(y = "Passengers (in millions)", title="Best 5 fitted models") +
+  autolayer(refc)
+
+```
+
+```{r}
+
+gg_tsresiduals(sfo_fit %>% select(Arima011011), lag_max = 36) + labs(title="Residuals Arima011011 model")
+gg_tsresiduals(sfo_fit %>% select(Arima012011), lag_max = 36) + labs(title="Residuals Arima012011 model")
+gg_tsresiduals(sfo_fit %>% select(Arima210011), lag_max = 36) + labs(title="Residuals Arima210011 model") 
+gg_tsresiduals(sfo_fit %>% select(Ets_damped_mul), lag_max = 36) + labs(title="Residuals Ets_damped_mul model") 
+gg_tsresiduals(sfo_fit %>% select(Ets_ses), lag_max = 36) + labs(title="Residuals Ets_ses model")
+
+
+```
+
+#### Ljung-Box test
+
+```{r}
+
+# find degree of freedom 
+sfo_fit %>%
+select(Arima012011) %>%
+report()
+
+augment(sfo_fit) %>%
+  filter(.model=="Arima012011") %>%
+  features(.innov, ljung_box, lag = 10, dof = 3)
+
+
+```
+
+For non-seasonal component, ARIMA(0,1,2) has 2 MA terms, for seasonal ARIMA(0,1,1) has 0 MA term estimated. Therefore the degree of freedom should be 5.
+
+Since the p-value \> 5%, not reject H0 at a significant level. The residuals could be considered white noise series and the model has adequately captured the underlying data.
+
+#### Model selection and forecast
+
+```{r}
+
+sfo_fit %>%
+  select(Ets_ses, Ets_damped_mul, Arima011011, Arima012011, Arima210011) %>%
+  forecast(h=36) %>%
+  autoplot(sfo_ts , level=NULL) +
+  labs(title = "Forecasted Models",
+  y="Passengers (in millions)")
+
+```
+
+```{r}
+
+sfo_fit %>%
+  select(Arima012011) %>%
+  forecast(h=36) %>%
+  autoplot(sfo_ts , level=NULL) +
+  labs(title = "Forecasted result for selected model(Arima012011)",
+  y="Passengers (in millions)")
+
+```
+
+```{r}
+
+forecasts <- sfo_fit %>%
+  select(Arima012011) %>%
+  forecast(h = 36)
+# Extract forecasted values
+  forecast_values <- forecasts$.mean
+# Print the forecasted values for model
+  print(forecast_values) # average - 6 mils passengers in the 3 year in the forecast.
+
+```
+
+#### Inverse root test
+
+```{r}
+
+gg_arma(sfo_fit %>%
+  select(Arima012011))
+```
+
+This inverse toot test implies that the model is stable and a good fit to the data. Also the model has capturing the underlying patterns of the time series.
